@@ -2,6 +2,8 @@ import logging
 import os
 import json
 import random
+import base64
+import mimetypes
 from typing import List, Dict, Any
 from urllib.parse import urlparse
 
@@ -16,6 +18,35 @@ from src.service.vlm_service import vlm_service
 from src.utils import collage_scheme
 
 logger = logging.getLogger(__name__)
+
+
+def _build_image_content_part(image_ref: str) -> Dict[str, Any] | None:
+    """
+    Build a LangChain/OpenAI-compatible image content part.
+
+    Local files are embedded as base64 data URLs so the model provider does not
+    need to download private or slow remote URLs.
+    """
+    if not image_ref:
+        return None
+
+    if os.path.exists(image_ref):
+        try:
+            mime_type = mimetypes.guess_type(image_ref)[0] or "image/jpeg"
+            with open(image_ref, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("utf-8")
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
+            }
+        except Exception as e:
+            logger.warning(f"本地图片转base64失败，将跳过: {image_ref}, error={e}")
+            return None
+
+    return {
+        "type": "image_url",
+        "image_url": {"url": image_ref},
+    }
 
 
 async def process_collage_results(result, state, index_to_local_path, unique_id, total_items, current_item):
@@ -426,7 +457,8 @@ def collect_poi_images(state, max_count: int = 15) -> List[Dict[str, Any]]:
 async def call_keyframe_assembler_llm(
         video_full_transcript: str,
         video_frame_list: List[Dict[str, Any]],
-        state: Any | None = None
+        state: Any | None = None,
+        local_image_paths: Dict[int, str] | None = None
 ):
     """
     构建 Key Frame Assembler 的提示与图片消息，并并行执行 LLM 与下载。
@@ -457,18 +489,21 @@ async def call_keyframe_assembler_llm(
         COLLAGE_SCHEME=collage_scheme_json,
     )
 
+    local_image_paths = local_image_paths or {}
+
     # 构建 user 消息的 content 部分（只包含图片）
     user_content_parts: List[Dict[str, Any]] = []
     for idx, frame in enumerate(video_frame_list, start=1):
+        frame_index = frame.get("index") or idx
+        local_path = local_image_paths.get(frame_index) or local_image_paths.get(idx)
         image_url = frame.get("image_url", "")
-        if image_url:
-            user_content_parts.append({
-                "type": "image_url",
-                "image_url": {"url": image_url},
-            })
+        image_ref = local_path or image_url
+        image_part = _build_image_content_part(image_ref)
+        if image_part:
+            user_content_parts.append(image_part)
 
     actual_image_count = len(user_content_parts)
-    logger.info(f"实际发送给LLM的图片数量: {actual_image_count}")
+    logger.info(f"实际发送给LLM的图片数量: {actual_image_count}，base64本地图片数量: {len(local_image_paths)}")
 
     langchain_messages = [
         SystemMessage(content=prompt),
@@ -521,7 +556,8 @@ async def call_keyframe_assembler_llm(
 async def call_poi_assembler_llm(
         video_full_transcript: str,
         poi_desc_list: List[Dict[str, Any]],
-        state: Any | None = None
+        state: Any | None = None,
+        local_image_paths: Dict[int, str] | None = None
 ):
     """
     构建 Key Frame Assembler 的提示与图片消息，并并行执行 LLM 与下载。
@@ -550,18 +586,20 @@ async def call_poi_assembler_llm(
         COLLAGE_SCHEME=collage_scheme_json,
     )
 
+    local_image_paths = local_image_paths or {}
+
     # 构建 user 消息的 content 部分（只包含图片）
     user_content_parts: List[Dict[str, Any]] = []
     for idx, frame in enumerate(poi_desc_list, start=1):
+        local_path = local_image_paths.get(idx)
         image_url = frame.get("image_url", "")
-        if image_url:
-            user_content_parts.append({
-                "type": "image_url",
-                "image_url": {"url": image_url},
-            })
+        image_ref = local_path or image_url
+        image_part = _build_image_content_part(image_ref)
+        if image_part:
+            user_content_parts.append(image_part)
 
     actual_image_count = len(user_content_parts)
-    logger.info(f"实际发送给LLM的图片数量: {actual_image_count}")
+    logger.info(f"实际发送给LLM的图片数量: {actual_image_count}，base64本地图片数量: {len(local_image_paths)}")
 
     langchain_messages = [
         SystemMessage(content=prompt),

@@ -1,4 +1,5 @@
 import random
+import os
 import time
 import uuid
 
@@ -59,7 +60,12 @@ async def xhs_hot_content_node(state: State):
         )
         xhs_hot_keywords = [it.get("keyword") for it in search_result if isinstance(it, dict) and it.get("keyword")]
 
-    xhs_hot_dot_result = await xhs_hot_leaderboard.get_xhs_hot_leaderboard()
+    enable_realtime_hot = os.getenv("ENABLE_XHS_REALTIME_HOT", "false").lower() == "true"
+    xhs_hot_dot_result = LOCAL_XHS_HOT_DOT_TITLES
+    if enable_realtime_hot:
+        realtime_hot_dot_result = await xhs_hot_leaderboard.get_xhs_hot_leaderboard()
+        if realtime_hot_dot_result:
+            xhs_hot_dot_result = realtime_hot_dot_result
 
     # 仅取前10条（不足10条则全量）
     xhs_hot_key_top10 = xhs_hot_keywords[:10]

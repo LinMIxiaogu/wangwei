@@ -1432,49 +1432,59 @@ async def collage_node(state: State):
 
     # 交由 collage_util 封装：构建 KeyFrame Assembler 消息并并发执行
     unique_id = str(uuid.uuid4())
-    logger.info(f"启动并发：LLM调用与图片下载，unique_id={unique_id}")
-    key_frame_llm_task = asyncio.create_task(
-        collage_util.call_keyframe_assembler_llm(
-            video_full_transcript,
-            video_frame_list,
-            state
-        )
-    )
+    logger.info(f"启动图片下载，unique_id={unique_id}")
     download_image_task = asyncio.create_task(download_oss_images_to_local(video_frame_list, unique_id))
 
     poi_desc_list = collage_util.collect_poi_images(state)
     poi_img_uuid = str(uuid.uuid4())
 
-    # 当 poi_desc_list 为空时，不启动相关任务，避免未定义变量导致 gather 报错
-    poi_llm_task = None
     down_load_poi_task = None
+    if poi_desc_list:
+        down_load_poi_task = asyncio.create_task(
+            download_poi_img_list(poi_desc_list, poi_img_uuid)
+        )
+
+    if down_load_poi_task:
+        process_img_local_path, poi_img_local_path = await asyncio.gather(
+            download_image_task,
+            down_load_poi_task
+        )
+    else:
+        process_img_local_path = await download_image_task
+        poi_img_local_path = {}
+
+    logger.info(
+        f"图片下载完成，关键帧本地图片={len(process_img_local_path or {})}，POI本地图片={len(poi_img_local_path or {})}"
+    )
+
+    logger.info(f"启动并发：使用本地base64图片调用拼图组装LLM，unique_id={unique_id}")
+    key_frame_llm_task = asyncio.create_task(
+        collage_util.call_keyframe_assembler_llm(
+            video_full_transcript,
+            video_frame_list,
+            state,
+            local_image_paths=process_img_local_path
+        )
+    )
+
+    poi_llm_task = None
     if poi_desc_list:
         poi_llm_task = asyncio.create_task(
             collage_util.call_poi_assembler_llm(
                 video_full_transcript,
                 poi_desc_list,
-                state
+                state,
+                local_image_paths=poi_img_local_path
             )
         )
-        down_load_poi_task = asyncio.create_task(
-            download_poi_img_list(poi_desc_list, poi_img_uuid)
-        )
 
-    if poi_llm_task and down_load_poi_task:
-        (process_img_res_content, _), process_img_local_path, poi_img_local_path, (poi_img_res_content,
-                                                                                   _) = await asyncio.gather(
+    if poi_llm_task:
+        (process_img_res_content, _), (poi_img_res_content, _) = await asyncio.gather(
             key_frame_llm_task,
-            download_image_task,
-            down_load_poi_task,
             poi_llm_task
         )
     else:
-        # 无 POI 数据时，仅等待前两个任务，并设置合理的默认值
-        (process_img_res_content, _), process_img_local_path = await asyncio.gather(
-            key_frame_llm_task,
-            download_image_task
-        )
-        poi_img_local_path = []
+        (process_img_res_content, _) = await key_frame_llm_task
         # 统一空结果格式，后续解析与统计逻辑可正常运行
         poi_img_res_content = json.dumps({"function": []}, ensure_ascii=False)
 
